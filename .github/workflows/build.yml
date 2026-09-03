@@ -48,6 +48,11 @@ jobs:
             eden-ds/src/android/**/*.gradle*
             eden-ds/src/android/gradle/wrapper/gradle-wrapper.properties
 
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes glslang-tools
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
