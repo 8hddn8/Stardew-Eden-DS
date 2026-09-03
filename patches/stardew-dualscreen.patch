@@ -1,0 +1,447 @@
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt
+index 5a2dc82..d424ca2 100644
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt
+@@ -190,6 +190,8 @@ object NativeLibrary {
+ 
+     external fun fillPlzaCompanionSnapshot(output: ByteBuffer): Int
+ 
++    external fun fillStardewCompanionSnapshot(output: ByteBuffer): Int
++
+     external fun performPlzaCompanionAction(action: Int, argument: Int): Boolean
+ 
+     external fun performPlzaCompanionItemAction(operation: Int, itemId: Int, partyTarget: Int): Int
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/activities/DualScreenPresentation.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/activities/DualScreenPresentation.kt
+index c445a1e..19859f0 100644
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/activities/DualScreenPresentation.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/activities/DualScreenPresentation.kt
+@@ -65,6 +65,7 @@ private class DualScreenCompanionHost(context: android.content.Context) : FrameL
+         private const val MK8D_TITLE_ID = 0x0100152000022000L
+         private const val ARKHAM_ASYLUM_TITLE_ID = 0x0100E870163CA000L
+         private const val PLZA_TITLE_ID = 0x0100F43008C44000L
++        private const val STARDEW_TITLE_ID = 0x0100E65002BB8000L
+         private const val ROUTE_INTERVAL_MS = 500L
+         private const val TRANSIENT_TITLE_MISS_SAMPLES = 6
+         private const val WAITING_ROUTE_ID = 0L
+@@ -131,13 +132,15 @@ private class DualScreenCompanionHost(context: android.content.Context) : FrameL
+     }
+ 
+     private fun normalizeRoute(titleId: Long): Long = when (titleId) {
+-        BOTW_TITLE_ID, MK8D_TITLE_ID, ARKHAM_ASYLUM_TITLE_ID, PLZA_TITLE_ID -> titleId
++        BOTW_TITLE_ID, MK8D_TITLE_ID, ARKHAM_ASYLUM_TITLE_ID, PLZA_TITLE_ID,
++            STARDEW_TITLE_ID -> titleId
+         else -> WAITING_ROUTE_ID
+     }
+ 
+     private fun isGameRoute(titleId: Long): Boolean =
+         titleId == BOTW_TITLE_ID || titleId == MK8D_TITLE_ID ||
+-            titleId == ARKHAM_ASYLUM_TITLE_ID || titleId == PLZA_TITLE_ID
++            titleId == ARKHAM_ASYLUM_TITLE_ID || titleId == PLZA_TITLE_ID ||
++            titleId == STARDEW_TITLE_ID
+ 
+     private fun route(titleId: Long) {
+         if (titleId == routedTitleId) return
+@@ -155,6 +158,7 @@ private class DualScreenCompanionHost(context: android.content.Context) : FrameL
+             MK8D_TITLE_ID -> Mk8dCompanionView(context)
+             ARKHAM_ASYLUM_TITLE_ID -> ArkhamCompanionView(context)
+             PLZA_TITLE_ID -> PlzaCompanionView(context)
++            STARDEW_TITLE_ID -> StardewCompanionView(context)
+             else -> WaitingForGameView(context)
+         }
+         addView(content, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/activities/StardewCompanionView.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/activities/StardewCompanionView.kt
+new file mode 100644
+index 0000000..ddae9ff
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/activities/StardewCompanionView.kt
+@@ -0,0 +1,191 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.activities
++
++import android.content.Context
++import android.graphics.Canvas
++import android.graphics.Color
++import android.graphics.Paint
++import android.graphics.RectF
++import android.graphics.Typeface
++import android.view.View
++import java.nio.ByteBuffer
++import java.nio.ByteOrder
++import java.util.concurrent.Executors
++import java.util.concurrent.ScheduledExecutorService
++import java.util.concurrent.TimeUnit
++import org.yuzu.yuzu_emu.NativeLibrary
++
++internal class StardewCompanionView(context: Context) : View(context) {
++    private companion object {
++        private const val SNAPSHOT_SIZE = 92
++        private const val SNAPSHOT_MAGIC = 0x56534453
++        private const val POLL_INTERVAL_MS = 250L
++        private const val STATUS_WAITING = 2
++        private const val STATUS_PROFILE_REQUIRED = 3
++        private const val STATUS_ACTIVE = 4
++    }
++
++    private val snapshot = ByteBuffer.allocateDirect(SNAPSHOT_SIZE).order(ByteOrder.LITTLE_ENDIAN)
++    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
++    private val bold = Typeface.create("sans-serif", Typeface.BOLD)
++    private val normal = Typeface.create("sans-serif", Typeface.NORMAL)
++    private var poller: ScheduledExecutorService? = null
++
++    @Volatile private var status = 0
++    @Volatile private var buildId = ""
++    @Volatile private var day = 0
++    @Volatile private var timeOfDay = 0
++    @Volatile private var money = 0
++    @Volatile private var stamina = 0f
++    @Volatile private var maxStamina = 0f
++    @Volatile private var health = 0
++    @Volatile private var maxHealth = 0
++
++    override fun onAttachedToWindow() {
++        super.onAttachedToWindow()
++        poller = Executors.newSingleThreadScheduledExecutor { runnable ->
++            Thread(runnable, "StardewCompanion").apply { isDaemon = true }
++        }.also {
++            it.scheduleWithFixedDelay(::pollSnapshot, 0, POLL_INTERVAL_MS, TimeUnit.MILLISECONDS)
++        }
++    }
++
++    override fun onDetachedFromWindow() {
++        poller?.shutdownNow()
++        poller = null
++        super.onDetachedFromWindow()
++    }
++
++    private fun pollSnapshot() {
++        snapshot.clear()
++        if (NativeLibrary.fillStardewCompanionSnapshot(snapshot) != SNAPSHOT_SIZE) return
++        snapshot.rewind()
++        if (snapshot.int != SNAPSHOT_MAGIC) return
++        snapshot.short // version
++        snapshot.short // size
++        snapshot.int // sequence
++        val nextStatus = snapshot.int
++        val buildBytes = ByteArray(32)
++        snapshot.get(buildBytes)
++        snapshot.long // main base (logged natively; deliberately not shown in normal UI)
++        snapshot.long // main size
++        val nextDay = snapshot.int
++        val nextTime = snapshot.int
++        val nextMoney = snapshot.int
++        val nextStamina = snapshot.float
++        val nextMaxStamina = snapshot.float
++        val nextHealth = snapshot.int
++        val nextMaxHealth = snapshot.int
++        val lastBuildByte = buildBytes.indexOfLast { it.toInt() != 0 }
++        val nextBuildId = if (lastBuildByte >= 0) {
++            buildBytes.copyOfRange(0, lastBuildByte + 1).joinToString("") { "%02X".format(it) }
++        } else {
++            ""
++        }
++
++        status = nextStatus
++        buildId = nextBuildId
++        day = nextDay
++        timeOfDay = nextTime
++        money = nextMoney
++        stamina = nextStamina
++        maxStamina = nextMaxStamina
++        health = nextHealth
++        maxHealth = nextMaxHealth
++        postInvalidateOnAnimation()
++    }
++
++    override fun onDraw(canvas: Canvas) {
++        super.onDraw(canvas)
++        canvas.drawColor(Color.rgb(36, 25, 39))
++        val scale = minOf(width / 1240f, height / 1080f)
++        val left = (width - 1240f * scale) / 2f
++        val top = (height - 1080f * scale) / 2f
++        canvas.save()
++        canvas.translate(left, top)
++        canvas.scale(scale, scale)
++
++        paint.typeface = bold
++        paint.color = Color.rgb(255, 226, 150)
++        paint.textSize = 70f
++        canvas.drawText("STARDEW VALLEY", 70f, 110f, paint)
++        paint.typeface = normal
++        paint.color = Color.rgb(230, 213, 189)
++        paint.textSize = 31f
++        canvas.drawText("Eden DS companion", 74f, 154f, paint)
++
++        if (status == STATUS_ACTIVE) drawHud(canvas) else drawSetup(canvas)
++        canvas.restore()
++    }
++
++    private fun drawSetup(canvas: Canvas) {
++        card(canvas, 65f, 220f, 1110f, 690f)
++        paint.typeface = bold
++        paint.color = Color.WHITE
++        paint.textSize = 48f
++        val title = when (status) {
++            STATUS_PROFILE_REQUIRED -> "Gioco rilevato"
++            STATUS_WAITING -> "Caricamento di Stardew Valley…"
++            else -> "In attesa del gioco…"
++        }
++        canvas.drawText(title, 110f, 310f, paint)
++
++        paint.typeface = normal
++        paint.color = Color.rgb(221, 210, 197)
++        paint.textSize = 31f
++        if (status == STATUS_PROFILE_REQUIRED) {
++            canvas.drawText("Questa build richiede il profilo di memoria.", 110f, 382f, paint)
++            canvas.drawText("Copia il Build ID riportato sotto per la calibrazione:", 110f, 430f, paint)
++            paint.typeface = Typeface.MONOSPACE
++            paint.color = Color.rgb(255, 226, 150)
++            paint.textSize = 28f
++            canvas.drawText(buildId.ifEmpty { "lettura in corso…" }, 110f, 505f, paint)
++            paint.typeface = normal
++            paint.color = Color.rgb(183, 225, 179)
++            paint.textSize = 27f
++            canvas.drawText("Eden_Log.txt contiene lo stesso identificativo.", 110f, 570f, paint)
++        } else {
++            canvas.drawText("Avvia Stardew Valley e carica un salvataggio.", 110f, 390f, paint)
++        }
++    }
++
++    private fun drawHud(canvas: Canvas) {
++        card(canvas, 65f, 220f, 1110f, 700f)
++        paint.typeface = bold
++        paint.color = Color.WHITE
++        paint.textSize = 52f
++        canvas.drawText("Giorno $day   ${formatTime(timeOfDay)}", 110f, 315f, paint)
++        paint.color = Color.rgb(255, 226, 150)
++        canvas.drawText("${money}g", 900f, 315f, paint)
++        meter(canvas, "Energia", stamina, maxStamina, 110f, 420f, Color.rgb(97, 190, 113))
++        meter(canvas, "Salute", health.toFloat(), maxHealth.toFloat(), 110f, 555f, Color.rgb(207, 75, 78))
++    }
++
++    private fun meter(canvas: Canvas, label: String, value: Float, max: Float, x: Float, y: Float, color: Int) {
++        paint.typeface = bold
++        paint.color = Color.WHITE
++        paint.textSize = 31f
++        canvas.drawText("$label  ${value.toInt()} / ${max.toInt()}", x, y, paint)
++        val bounds = RectF(x, y + 28f, x + 900f, y + 76f)
++        paint.color = Color.rgb(63, 51, 65)
++        canvas.drawRoundRect(bounds, 18f, 18f, paint)
++        val fraction = if (max > 0f) (value / max).coerceIn(0f, 1f) else 0f
++        paint.color = color
++        val fill = RectF(
++            bounds.left,
++            bounds.top,
++            bounds.left + bounds.width() * fraction,
++            bounds.bottom
++        )
++        canvas.drawRoundRect(fill, 18f, 18f, paint)
++    }
++
++    private fun card(canvas: Canvas, x: Float, y: Float, width: Float, height: Float) {
++        paint.color = Color.rgb(52, 39, 55)
++        canvas.drawRoundRect(RectF(x, y, x + width, y + height), 34f, 34f, paint)
++    }
++
++    private fun formatTime(raw: Int): String = "%02d:%02d".format(raw / 100, raw % 100)
++}
+diff --git a/src/android/app/src/main/jni/CMakeLists.txt b/src/android/app/src/main/jni/CMakeLists.txt
+index c093e19..b4d88d2 100644
+--- a/src/android/app/src/main/jni/CMakeLists.txt
++++ b/src/android/app/src/main/jni/CMakeLists.txt
+@@ -15,6 +15,8 @@ add_library(yuzu-android SHARED
+     mk8d_companion.h
+     plza_companion.cpp
+     plza_companion.h
++    stardew_companion.cpp
++    stardew_companion.h
+     emu_window/emu_window.cpp
+     emu_window/emu_window.h
+     native.cpp
+diff --git a/src/android/app/src/main/jni/native.cpp b/src/android/app/src/main/jni/native.cpp
+index c3e60d1..cb4ad6f 100644
+--- a/src/android/app/src/main/jni/native.cpp
++++ b/src/android/app/src/main/jni/native.cpp
+@@ -95,6 +95,7 @@ extern "C" {
+ #include "jni/botw_romfs_assets.h"
+ #include "jni/mk8d_companion.h"
+ #include "jni/plza_companion.h"
++#include "jni/stardew_companion.h"
+ #include "jni/native.h"
+ #include "video_core/frame_gen/lossless_dll.h"
+ #include "video_core/renderer_base.h"
+@@ -819,6 +820,20 @@ jint Java_org_yuzu_yuzu_1emu_NativeLibrary_fillPlzaCompanionSnapshot(
+                                        static_cast<std::size_t>(capacity));
+ }
+ 
++jint Java_org_yuzu_yuzu_1emu_NativeLibrary_fillStardewCompanionSnapshot(
++    JNIEnv* env, jobject instance, jobject output) {
++    if (!output) {
++        return -1;
++    }
++    void* address = env->GetDirectBufferAddress(output);
++    const jlong capacity = env->GetDirectBufferCapacity(output);
++    if (!address || capacity <= 0) {
++        return -1;
++    }
++    return StardewCompanion::FillSnapshot(EmulationSession::GetInstance(), address,
++                                           static_cast<std::size_t>(capacity));
++}
++
+ jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_performPlzaCompanionAction(
+     JNIEnv* env, jobject instance, jint action, jint argument) {
+     return PlzaCompanion::PerformAction(EmulationSession::GetInstance(), action, argument)
+diff --git a/src/android/app/src/main/jni/stardew_companion.cpp b/src/android/app/src/main/jni/stardew_companion.cpp
+new file mode 100644
+index 0000000..6fd5c9f
+--- /dev/null
++++ b/src/android/app/src/main/jni/stardew_companion.cpp
+@@ -0,0 +1,127 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#include "jni/stardew_companion.h"
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cstddef>
++#include <cstring>
++#include <string>
++
++#include "common/common_types.h"
++#include "common/logging.h"
++#include "core/core.h"
++#include "jni/native.h"
++
++namespace StardewCompanion {
++namespace {
++
++constexpr u64 TitleId = 0x0100E65002BB8000ULL;
++constexpr u32 Magic = 0x56534453; // "SDSV" in the little-endian snapshot.
++
++enum class Status : u32 {
++    NotRunning = 0,
++    WrongTitle = 1,
++    WaitingForGame = 2,
++    ProfileRequired = 3,
++    Active = 4,
++};
++
++#pragma pack(push, 1)
++struct SnapshotFrame {
++    u32 magic;
++    u16 version;
++    u16 size;
++    u32 sequence;
++    u32 status;
++    std::array<u8, 0x20> build_id;
++    u64 main_base;
++    u64 main_size;
++    s32 day;
++    s32 time_of_day;
++    s32 money;
++    float stamina;
++    float max_stamina;
++    s32 health;
++    s32 max_health;
++};
++#pragma pack(pop)
++
++static_assert(sizeof(SnapshotFrame) == 92);
++
++std::atomic<u32> Sequence{0};
++std::atomic<u64> LoggedProcessId{0};
++
++bool HasBuildId(const std::array<u8, 0x20>& build_id) {
++    return std::any_of(build_id.begin(), build_id.end(), [](u8 value) { return value != 0; });
++}
++
++void LogDetectedBuild(Core::System& system, const SnapshotFrame& frame) {
++    const auto* process = system.ApplicationProcess();
++    const u64 process_id = process ? process->GetProcessId() : 0;
++    if (!process_id || LoggedProcessId.exchange(process_id, std::memory_order_relaxed) == process_id) {
++        return;
++    }
++    std::string build;
++    build.reserve(frame.build_id.size() * 2);
++    constexpr char Hex[] = "0123456789ABCDEF";
++    for (const u8 byte : frame.build_id) {
++        build.push_back(Hex[byte >> 4]);
++        build.push_back(Hex[byte & 0x0F]);
++    }
++    while (build.size() >= 2 && build.ends_with("00")) {
++        build.resize(build.size() - 2);
++    }
++    LOG_INFO(Frontend,
++             "[Stardew Companion] Detected title={:016X} build={} main={:#x}+{:#x}; "
++             "a memory profile is required",
++             TitleId, build, frame.main_base, frame.main_size);
++}
++
++} // namespace
++
++int FillSnapshot(EmulationSession& session, void* output, std::size_t output_size) {
++    if (!output || output_size < sizeof(SnapshotFrame)) {
++        return -static_cast<int>(sizeof(SnapshotFrame));
++    }
++
++    SnapshotFrame frame{};
++    frame.magic = Magic;
++    frame.version = 1;
++    frame.size = sizeof(frame);
++    frame.sequence = Sequence.fetch_add(1, std::memory_order_relaxed) + 1;
++    frame.status = static_cast<u32>(Status::NotRunning);
++
++    if (!session.IsRunning()) {
++        std::memcpy(output, &frame, sizeof(frame));
++        return sizeof(frame);
++    }
++
++    auto& system = session.System();
++    if (system.GetApplicationProcessProgramID() != TitleId) {
++        frame.status = static_cast<u32>(Status::WrongTitle);
++        std::memcpy(output, &frame, sizeof(frame));
++        return sizeof(frame);
++    }
++
++    const auto [main_base, main_size] = system.GetApplicationProcessMainModule();
++    frame.main_base = main_base;
++    frame.main_size = main_size;
++    frame.build_id = system.GetApplicationProcessBuildID();
++    if (!main_base || !main_size || !HasBuildId(frame.build_id)) {
++        frame.status = static_cast<u32>(Status::WaitingForGame);
++    } else {
++        // Live values intentionally remain disabled until this exact build has a verified
++        // pointer/offset profile. This prevents an update from turning arbitrary guest bytes
++        // into plausible-looking player data.
++        frame.status = static_cast<u32>(Status::ProfileRequired);
++        LogDetectedBuild(system, frame);
++    }
++
++    std::memcpy(output, &frame, sizeof(frame));
++    return sizeof(frame);
++}
++
++} // namespace StardewCompanion
+diff --git a/src/android/app/src/main/jni/stardew_companion.h b/src/android/app/src/main/jni/stardew_companion.h
+new file mode 100644
+index 0000000..caf6d06
+--- /dev/null
++++ b/src/android/app/src/main/jni/stardew_companion.h
+@@ -0,0 +1,14 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <cstddef>
++
++class EmulationSession;
++
++namespace StardewCompanion {
++
++int FillSnapshot(EmulationSession& session, void* output, std::size_t output_size);
++
++}
