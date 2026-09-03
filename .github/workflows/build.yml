@@ -1,0 +1,79 @@
+name: Build Stardew Dual Screen APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "patches/**"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stardew-eden-ds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out mod repository
+        uses: actions/checkout@v4
+
+      - name: Check out pinned Eden DS source
+        uses: actions/checkout@v4
+        with:
+          repository: JoeCorrell/Eden-DS
+          ref: dbe6b5c66bf9bdcf6667ab383ea6193f7ebaf7f9
+          path: eden-ds
+          submodules: recursive
+
+      - name: Apply Stardew patch
+        run: |
+          git -C eden-ds apply --check "$GITHUB_WORKSPACE/patches/stardew-dualscreen.patch"
+          git -C eden-ds apply "$GITHUB_WORKSPACE/patches/stardew-dualscreen.patch"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            eden-ds/src/android/**/*.gradle*
+            eden-ds/src/android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android components
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "cmake;3.31.6" \
+            "ndk;28.2.13676358"
+
+      - name: Build dual-screen APK
+        working-directory: eden-ds/src/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDualscreenRelWithDebInfo \
+            --no-daemon \
+            --max-workers=1 \
+            --no-parallel \
+            --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eden-DS-Stardew-calibration
+          path: eden-ds/src/android/app/build/outputs/apk/dualscreen/relWithDebInfo/app-dualscreen-relWithDebInfo.apk
+          if-no-files-found: error
+          retention-days: 14
