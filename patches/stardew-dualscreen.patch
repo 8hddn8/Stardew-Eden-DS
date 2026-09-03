@@ -294,10 +294,10 @@ index c3e60d1..cb4ad6f 100644
      return PlzaCompanion::PerformAction(EmulationSession::GetInstance(), action, argument)
 diff --git a/src/android/app/src/main/jni/stardew_companion.cpp b/src/android/app/src/main/jni/stardew_companion.cpp
 new file mode 100644
-index 0000000..6fd5c9f
+index 0000000..9bd0c4e
 --- /dev/null
 +++ b/src/android/app/src/main/jni/stardew_companion.cpp
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,128 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -313,6 +313,7 @@ index 0000000..6fd5c9f
 +#include "common/common_types.h"
 +#include "common/logging.h"
 +#include "core/core.h"
++#include "core/hle/kernel/k_process.h"
 +#include "jni/native.h"
 +
 +namespace StardewCompanion {
